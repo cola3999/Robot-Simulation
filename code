@@ -1,0 +1,265 @@
+#define NOMINMAX
+#include <graphics.h>   // EasyX 图形库
+#include <conio.h>
+#include <tchar.h>
+#include <cstddef>
+#include <vector>
+#include <ctime>
+#include <cmath>
+#include <algorithm>
+#include<iostream>
+
+// 避免 windows.h 或 graphics.h 中定义的 min/max 宏干扰 std::min/std::max
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+const int    WIDTH = 800;
+const int    HEIGHT = 600;
+const double PI = 3.14159265358979323846;
+
+// ==================== 数据结构 ====================
+struct MyRect {          // 矩形障碍物（x, y 是左上角坐标）
+    float x, y, w, h;
+};
+
+struct Robot {
+    float x, y;          // 位置（车身中心）
+    float angle;         // 朝向（弧度。屏幕坐标系：0=向右，正方向=顺时针向下）
+    float radius;        // 车身半径
+    float sensorRange;   // 光电传感器探测距离
+    int   turnCount;     // 避障转向次数（仅用于显示）
+};
+
+// ==================== 碰撞检测 ====================
+
+// 圆(cx,cy,r) 与 矩形 rect 是否相交
+inline float clampf(float v, float a, float b) {
+    return v < a ? a : (v > b ? b : v);
+}
+
+bool circleRectCollide(float cx, float cy, float r, const MyRect& rc) {
+    // 找到矩形上离圆心最近的点（避免使用 std::min/std::max，防止宏干扰）
+    float nx = clampf(cx, rc.x, rc.x + rc.w);
+    float ny = clampf(cy, rc.y, rc.y + rc.h);
+    float dx = cx - nx;
+    float dy = cy - ny;
+    return dx * dx + dy * dy < r * r;   // 比较平方，省去开根号
+}
+
+// 圆是否和任意一个障碍物相碰
+bool collideAny(float cx, float cy, float r, const std::vector<MyRect>& obs) {
+    for (int i = 0; i < (int)obs.size(); ++i) {
+        if (circleRectCollide(cx, cy, r, obs[i])) return true;
+    }
+    return false;
+}
+
+// 点 (px,py) 是否落在某个障碍物内部
+bool pointInside(float px, float py, const std::vector<MyRect>& obs) {
+    for (int i = 0; i < (int)obs.size(); ++i) {
+        const MyRect& r = obs[i];
+        if (px >= r.x && px <= r.x + r.w &&
+            py >= r.y && py <= r.y + r.h) return true;
+    }
+    return false;
+}
+
+// ==================== 传感器 ====================
+// 沿机器人当前朝向发射一条射线，做等距采样
+// 返回 true 表示探测到障碍物，hitDist 输出探测到的距离
+bool sensorDetect(const Robot& robot, const std::vector<MyRect>& obs, float& hitDist) {
+    const float step = 2.0f;    // 采样步长（越小越精确，越慢）
+    for (float d = robot.radius; d <= robot.sensorRange; d += step) {
+        float px = robot.x + (float)cos(robot.angle) * d;
+        float py = robot.y + (float)sin(robot.angle) * d;
+        if (pointInside(px, py, obs)) {
+            hitDist = d;
+            return true;
+        }
+    }
+    hitDist = robot.sensorRange;
+    return false;
+}
+
+// ==================== 绘制机器人 ====================
+void drawRobot(const Robot& robot, bool hit, float hitDist) {
+    int cx = (int)robot.x;
+    int cy = (int)robot.y;
+    int r = (int)robot.radius;
+
+    // 车身朝向线与传感器射线的端点
+    int hx = (int)(robot.x + cos(robot.angle) * robot.radius);
+    int hy = (int)(robot.y + sin(robot.angle) * robot.radius);
+    int ex = (int)(robot.x + cos(robot.angle) * hitDist);
+    int ey = (int)(robot.y + sin(robot.angle) * hitDist);
+
+    // 1) 先画传感器射线（红色=探测到障碍，绿色=畅通）
+    setlinestyle(PS_SOLID, 2);
+    setlinecolor(hit ? RGB(230, 60, 60) : RGB(60, 190, 90));
+    line(hx, hy, ex, ey);
+
+    // 2) 车身
+    setfillcolor(RGB(80, 170, 255));
+    solidcircle(cx, cy, r);
+
+    // 3) 朝向指示（白色短线）
+    setlinecolor(WHITE);
+    setlinestyle(PS_SOLID, 3);
+    line(cx, cy, hx, hy);
+
+    // 4) 车身外圈
+    setlinecolor(RGB(20, 80, 150));
+    setlinestyle(PS_SOLID, 2);
+    circle(cx, cy, r);
+
+    // 5) 传感器探头小圆点
+    setfillcolor(hit ? RGB(230, 60, 60) : RGB(60, 190, 90));
+    solidcircle(ex, ey, 4);
+}
+
+// ==================== 主函数 ====================
+int main() {
+    initgraph(WIDTH, HEIGHT);
+    setbkcolor(RGB(250, 250, 250));   // 背景色要在 cleardevice 前设置
+    BeginBatchDraw();                 // 开启双缓冲，防止闪烁
+
+    srand((unsigned)time(NULL));
+
+    // ---- 初始化机器人 ----
+    Robot robot;
+    robot.x = WIDTH / 2.0f;
+    robot.y = HEIGHT / 2.0f;
+    robot.angle = 0.0f;      // 初始朝右
+    robot.radius = 15.0f;
+    robot.sensorRange = 90.0f;
+    robot.turnCount = 0;
+
+    // ---- 随机生成障碍物 ----
+    std::vector<MyRect> obstacles;
+    int placed = 0, tries = 0;
+    while (placed < 10 && tries < 600) {
+        ++tries;
+        MyRect r;
+        r.w = (float)(60 + rand() % 110);
+        r.h = (float)(60 + rand() % 110);
+        r.x = (float)(20 + rand() % (int)(WIDTH - 40 - r.w));
+        r.y = (float)(20 + rand() % (int)(HEIGHT - 40 - r.h));
+
+        // 出生点周围留出安全区，别一开局就被围住
+        if (r.x < robot.x + 160 && r.x + r.w > robot.x - 160 &&
+            r.y < robot.y + 160 && r.y + r.h > robot.y - 160) continue;
+
+        // 不与其他障碍物重叠
+        bool overlap = false;
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+            const MyRect& o = obstacles[i];
+            if (r.x < o.x + o.w && r.x + r.w > o.x &&
+                r.y < o.y + o.h && r.y + r.h > o.y) {
+                overlap = true; break;
+            }
+        }
+        if (overlap) continue;
+
+        obstacles.push_back(r);
+        ++placed;
+    }
+
+    const float SPEED = 2.2f;   // 每帧移动的像素数
+
+    // ==================== 主循环 ====================
+    while (!_kbhit()) {          // 按任意键退出
+
+        // ---------- 1. 感知 ----------
+        float hitDist = robot.sensorRange;
+        bool  hit = sensorDetect(robot, obstacles, hitDist);
+
+        // ---------- 2. 决策 ----------
+        if (hit) {
+            // 前方有障碍：随机向左或向右转 45° ~ 135°
+            float turn = (float)(45 + rand() % 91) * (float)PI / 180.0f;
+            if (rand() % 2 == 0) turn = -turn;
+            robot.angle += turn;
+            ++robot.turnCount;
+        }
+        else if (rand() % 150 == 0) {
+            // 偶尔随机小幅转向，让路线不那么呆板
+            robot.angle += (float)(rand() % 61 - 30) * (float)PI / 180.0f;
+        }
+
+        // ---------- 3. 执行移动 + 边界处理 ----------
+        float nx = robot.x + (float)cos(robot.angle) * SPEED;
+        float ny = robot.y + (float)sin(robot.angle) * SPEED;
+
+        bool bounced = false;
+        if (nx < robot.radius) {                    // 撞左墙：水平方向反射
+            robot.angle = (float)(PI - robot.angle);
+            bounced = true;
+        }
+        else if (nx > WIDTH - robot.radius) {     // 撞右墙
+            robot.angle = (float)(PI - robot.angle);
+            bounced = true;
+        }
+        if (ny < robot.radius) {                    // 撞上墙：竖直方向反射
+            robot.angle = -robot.angle;
+            bounced = true;
+        }
+        else if (ny > HEIGHT - robot.radius) {    // 撞下墙
+            robot.angle = -robot.angle;
+            bounced = true;
+        }
+
+        if (!bounced) {
+            if (!collideAny(nx, ny, robot.radius, obstacles)) {
+                robot.x = nx;
+                robot.y = ny;
+            }
+            else {
+                // 万一已经贴住了障碍物，转 90° 再走
+                robot.angle += (float)(PI * 0.5);
+            }
+        }
+
+        // 角度归一化到 [-PI, PI]，防止数值越滚越大
+        while (robot.angle > PI) robot.angle -= (float)(2 * PI);
+        while (robot.angle < -PI) robot.angle += (float)(2 * PI);
+
+        // ---------- 4. 绘制画面 ----------
+        cleardevice();
+
+        // 障碍物
+        setfillcolor(RGB(150, 150, 160));
+        setlinecolor(RGB(100, 100, 110));
+        setlinestyle(PS_SOLID, 1);
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+            const MyRect& r = obstacles[i];
+            solidrectangle((int)r.x, (int)r.y,
+                (int)(r.x + r.w), (int)(r.y + r.h));
+        }
+
+        // 机器人和传感器射线
+        drawRobot(robot, hit, hitDist);
+
+        // 文字信息
+        TCHAR info[160];
+        _stprintf_s(info, 160, _T("Angle: %4.0f deg    Avoid: %d    %s"),
+            robot.angle * 180.0 / PI,
+            robot.turnCount,
+            hit ? _T("Obstacle ahead -> turning")
+            : _T("Moving forward"));
+        setbkmode(TRANSPARENT);
+        settextcolor(RGB(60, 60, 60));
+        outtextxy(12, 12, info);
+        outtextxy(12, 34, _T("Press any key to exit..."));
+
+        FlushBatchDraw();   // 一次性把这一帧画到屏幕上
+        Sleep(16);          // ≈60 帧/秒
+    }
+
+    EndBatchDraw();
+    closegraph();
+    return 0;
+}
